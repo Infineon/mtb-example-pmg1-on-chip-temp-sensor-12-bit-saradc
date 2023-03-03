@@ -7,7 +7,7 @@
 * Related Document: See README.md
 *
 *******************************************************************************
-* Copyright 2022, Cypress Semiconductor Corporation (an Infineon company) or
+* Copyright 2022-2023, Cypress Semiconductor Corporation (an Infineon company) or
 * an affiliate of Cypress Semiconductor Corporation.  All rights reserved.
 *
 * This software, including source code, documentation and related
@@ -46,7 +46,7 @@
 #include "cybsp.h"
 #include "cy_pdl.h"
 #include "stdio.h"
-
+#include <inttypes.h>
 
 /*******************************************************************************
  * Macros
@@ -54,8 +54,14 @@
 #define CY_ASSERT_FAILED            (0u)
 #define SW_DEBOUNCE_DELAY           (25u)    /* 25 milliseconds */
 #define LED_FLASH_DELAY             (50u)    /* 50 milliseconds */
-#define SFLASH_SAR_TEMP_MULTIPLIER  (0x0FFFF264)   /* Flash address containing temperature slope data */
-#define SFLASH_SAR_TEMP_OFFSET      (0x0FFFF266)   /* Flash address containing temperature offset data */
+
+/* Debug print macro to enable the UART print */
+#define DEBUG_PRINT                 (0u)
+
+/*******************************************************************************
+* Global Variable
+*******************************************************************************/
+cy_stc_scb_uart_context_t UART_context;
 
 /* User Switch Interrupt Configuration */
 const cy_stc_sysint_t User_Switch_intr_config =
@@ -68,6 +74,39 @@ const cy_stc_sysint_t User_Switch_intr_config =
 volatile uint8_t SwitchPressFlag = 0;
 
 void User_Switch_Interrupt_Handler(void);
+
+#if DEBUG_PRINT
+/* Variable used for tracking the print status */
+volatile bool ENTER_LOOP = true;
+
+/*******************************************************************************
+* Function Name: check_status
+********************************************************************************
+* Summary:
+*  Prints the error message.
+*
+* Parameters:
+*  error_msg - message to print if any error encountered.
+*  status - status obtained after evaluation.
+*
+* Return:
+*  void
+*
+*******************************************************************************/
+void check_status(char *message, cy_rslt_t status)
+{
+    char error_msg[50];
+
+    sprintf(error_msg, "Error Code: 0x%08" PRIX32 "\n", status);
+
+    Cy_SCB_UART_PutString(CYBSP_UART_HW, "\r\n=====================================================\r\n");
+    Cy_SCB_UART_PutString(CYBSP_UART_HW, "\nFAIL: ");
+    Cy_SCB_UART_PutString(CYBSP_UART_HW, message);
+    Cy_SCB_UART_PutString(CYBSP_UART_HW, "\r\n");
+    Cy_SCB_UART_PutString(CYBSP_UART_HW, error_msg);
+    Cy_SCB_UART_PutString(CYBSP_UART_HW, "\r\n=====================================================\r\n");
+}
+#endif
 
 /*******************************************************************************
 * Function Name: main
@@ -90,10 +129,8 @@ void User_Switch_Interrupt_Handler(void);
 int main(void)
 {
     cy_rslt_t result;
-    cy_stc_scb_uart_context_t UART_context;
-
-    int16_t* A = (int16_t*)SFLASH_SAR_TEMP_MULTIPLIER;    /* Temperature slope data */
-    int16_t* B = (int16_t*)SFLASH_SAR_TEMP_OFFSET;    /* Temperature offset data */
+    cy_en_sysint_status_t intr_result;
+    SFLASH_Type *sflash = SFLASH;
 
     int16_t ADC_injResult;    /* Variable storing ADC injection channel value */
     char_t temp_string[50];    /* Variable storing temperature data as a string for UART transmission */
@@ -113,25 +150,41 @@ int main(void)
         CY_ASSERT(CY_ASSERT_FAILED);
     }
 
-    /* SAR ADC initialization */
-    cy_en_sar_status_t sarStatus = Cy_SAR_Init(SAR0, &CYBSP_ADC0_config);
-    if (CY_SAR_SUCCESS != sarStatus)
-    {
-        /* Insert error handling here */
-        CY_ASSERT(CY_ASSERT_FAILED);
-    }
-    
-    /* SAR ADC enabling */
-    Cy_SAR_Enable(SAR0); 
-
     /* Configure and enable the UART peripheral */
     Cy_SCB_UART_Init(CYBSP_UART_HW, &CYBSP_UART_config, &UART_context);
     Cy_SCB_UART_Enable(CYBSP_UART_HW);
 
-    /* Initialize Switch GPIO interrupt */
-    result = Cy_SysInt_Init(&User_Switch_intr_config, &User_Switch_Interrupt_Handler);
-    if (result != CY_SYSINT_SUCCESS)
+#if DEBUG_PRINT
+    /* Sequence to clear screen */
+    Cy_SCB_UART_PutString(CYBSP_UART_HW, "\x1b[2J\x1b[;H");
+
+    /* Print "On-chip temp sensor 12-bit SAR ADC" */
+    Cy_SCB_UART_PutString(CYBSP_UART_HW, "****************** ");
+    Cy_SCB_UART_PutString(CYBSP_UART_HW, "PMG1 MCU: On-chip temp sensor 12-bit SAR ADC");
+    Cy_SCB_UART_PutString(CYBSP_UART_HW, "***************** \r\n\n");
+#endif
+
+    /* SAR ADC initialization */
+    cy_en_sar_status_t sarStatus = Cy_SAR_Init(SAR0, &CYBSP_ADC0_config);
+    if (sarStatus != CY_SAR_SUCCESS  )
     {
+#if DEBUG_PRINT
+        check_status("API Cy_SAR_Init failed with error code", sarStatus);
+#endif
+        /* Insert error handling here */
+        CY_ASSERT(CY_ASSERT_FAILED);
+    }
+
+    /* SAR ADC enabling */
+    Cy_SAR_Enable(SAR0);
+
+    /* Initialize Switch GPIO interrupt */
+    intr_result = Cy_SysInt_Init(&User_Switch_intr_config, &User_Switch_Interrupt_Handler);
+    if (intr_result != CY_SYSINT_SUCCESS)
+    {
+#if DEBUG_PRINT
+        check_status("API Cy_SysInt_Init failed with error code", intr_result);
+#endif
         /* Insert error handling here */
         CY_ASSERT(CY_ASSERT_FAILED);
     }
@@ -144,7 +197,7 @@ int main(void)
     __enable_irq();
 
     /* Send a string over serial terminal */
-    Cy_SCB_UART_PutString(CYBSP_UART_HW,"Press user switch (SW2) to display the Die-Temperature: \r\n\n");
+    Cy_SCB_UART_PutString(CYBSP_UART_HW,"\n Press user switch (SW2) to display the Die-Temperature: \r\n\n");
 
     for(;;)
     {
@@ -174,7 +227,7 @@ int main(void)
                 /* now ADC_injResult contains the injection channel result */
 
                 /* Temperature conversion algorithm*/
-                temp_initial_1 = (*A) * ADC_injResult + 1024 * (*B);    /* Temperature value with slope error */
+                temp_initial_1 = ((int16_t)sflash->SAR_TEMP_MULTIPLIER) * ADC_injResult + 1024 * ((int16_t)sflash->SAR_TEMP_OFFSET);    /* Temperature value with slope error */
                 temp_initial_2 = (temp_initial_1 >> 16) * 65536;    /* Upper 16 bits x 2^16 */
                                                                     /* 2^16 = 65536 */
                 if ((temp_initial_1 >> 16) > 15)                    /* If temperature > 15C */
@@ -206,6 +259,13 @@ int main(void)
             /* Clear the Switch Press Event */
             SwitchPressFlag = 0;
         }
+#if DEBUG_PRINT
+        if (ENTER_LOOP)
+        {
+            Cy_SCB_UART_PutString(CYBSP_UART_HW, "Entered for loop \r\n");
+            ENTER_LOOP = false;
+        }
+#endif
     }
 }
 
